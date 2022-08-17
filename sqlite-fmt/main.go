@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -35,8 +34,7 @@ type DbHeader struct {
 	SQLiteVersion              uint32
 }
 
-func readHeader(bs []byte) (DbHeader, error) {
-	r := bytes.NewReader(bs)
+func readHeader(r io.Reader) (DbHeader, error) {
 	result := DbHeader{}
 	if err := binary.Read(r, binary.BigEndian, &result); err != nil {
 		return DbHeader{}, fmt.Errorf("failed to decode header: %v", err)
@@ -50,13 +48,7 @@ func main() {
 		log.Fatal("failed to open db", err)
 	}
 	defer f.Close()
-
-	buf := make([]byte, 100)
-	_, err = io.ReadAtLeast(f, buf, 100)
-	if err != nil {
-		log.Fatal(err)
-	}
-	header, err := readHeader(buf)
+	header, err := readHeader(f)
 	if err != nil {
 		log.Fatalf("failed to read sqllite header: %v", err)
 	}
