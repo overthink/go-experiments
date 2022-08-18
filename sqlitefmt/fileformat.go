@@ -1,6 +1,7 @@
 package sqlitefmt
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -11,6 +12,19 @@ type DbFile struct {
 	Filename string
 	file     *os.File
 	Header   DbHeader
+}
+
+type BTreeLeafPage struct {
+	Type                uint8
+	FirstFreeblock      uint16
+	CellCount           uint16
+	CellContentStart    uint16
+	FragmentedFreeBytes uint8
+}
+
+type BTreeInteriorPage struct {
+	BTreeLeafPage
+	RightmostPointer uint32
 }
 
 func NewDbFile(filename string) (DbFile, error) {
@@ -33,6 +47,46 @@ func (dbf *DbFile) Close() error {
 	return nil
 }
 
+func (dbf *DbFile) Page(pageNum uint32) (interface{}, error) {
+	if pageNum > dbf.Header.NumPages {
+		return nil, fmt.Errorf(
+			"asked for page %d but max page is %d",
+			pageNum,
+			dbf.Header.NumPages,
+		)
+	}
+	offset := int64(dbf.Header.PageSize) * int64(pageNum-1)
+	_, err := dbf.file.Seek(offset, io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]byte, dbf.Header.PageSize)
+	_, err = io.ReadAtLeast(dbf.file, data, int(dbf.Header.PageSize))
+	if pageNum == 1 {
+		// Page 1 contains 100 bytes of db header, so chuck that
+		data = data[100:]
+	}
+	r := bytes.NewReader(data)
+	if data[0] == 0x02 || data[0] == 0x05 {
+		// interior page
+		result := BTreeInteriorPage{}
+		if err := binary.Read(r, binary.BigEndian, &result); err != nil {
+			return nil, fmt.Errorf("failed to decode interior btree page header: %v", err)
+		}
+		return result, nil
+	} else if data[0] == 0x0a || data[0] == 0x0d {
+		// leaf page
+		result := BTreeLeafPage{}
+		if err := binary.Read(r, binary.BigEndian, &result); err != nil {
+			return nil, fmt.Errorf("failed to decode leaf btree page header: %v", err)
+		}
+		return result, nil
+	}
+	return nil, fmt.Errorf("invalid btree page type: %v", data[0])
+}
+
+// DbHeader is the format of the first 100 bytes of an SQLite file.
+// https://www.sqlite.org/fileformat.html#the_database_header
 type DbHeader struct {
 	HeaderBytes                [16]byte
 	PageSize                   uint16
@@ -43,7 +97,7 @@ type DbHeader struct {
 	MinEmbeddedPayloadFraction uint8
 	LeafPayloadFraction        uint8
 	FileChangeCount            uint32
-	SizePages                  uint32
+	NumPages                   uint32
 	FirstFreelistTrunkPage     uint32
 	FreelistPagesCount         uint32
 	SchemaCookie               uint32
@@ -98,7 +152,7 @@ func (h *DbHeader) SQLiteVersionString() string {
 func (h *DbHeader) Print() {
 	println("Header string:      ", h.HeaderBytesString())
 	println("Page size:          ", h.PageSize)
-	println("Number of pages:    ", h.SizePages)
+	println("Number of pages:    ", h.NumPages)
 	println("File change count:  ", h.FileChangeCount)
 	println("Text encoding:      ", h.TextEncodingString())
 	println("Read version:       ", h.ReadVersionString())
@@ -114,28 +168,3 @@ func readHeader(r io.Reader) (DbHeader, error) {
 	}
 	return result, nil
 }
-
-type BTreeLeafPage struct {
-	Type                uint8
-	FirstFreeblock      uint16
-	CellCount           uint16
-	CellContentStart    uint16
-	FragmentedFreeBytes uint8
-}
-
-type BTreeInteriorPage struct {
-	BTreeLeafPage
-	RightmostPointer uint32
-}
-
-type Page struct {
-	data []byte
-}
-
-/*
-func GetPage(f io.ReadSeeker, pageSize uint16, pageNum uint32) (Page, error) {
-	offset := pageSize * (pageNum - 1)
-	f.Seek(offset, io.SeekStart)
-	return Page{}, nil
-}
-*/
