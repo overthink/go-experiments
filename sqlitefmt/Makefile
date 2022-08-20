@@ -1,3 +1,8 @@
 .PHONY: inspect
 inspect:
-	cd cmd/inspect && go run .
+	go run cmd/inspect/main.go dbs/test.db
+
+.PHONY: debug
+debug:
+	dlv debug cmd/inspect/main.go -- dbs/test.db
+

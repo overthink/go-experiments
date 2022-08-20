@@ -2,11 +2,16 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sqlitefmt"
 )
 
 func main() {
-	dbf, err := sqlitefmt.NewDbFile("test.db")
+	if len(os.Args) != 2 {
+		fmt.Printf("usage: %s DBFILE\n", os.Args[0])
+		os.Exit(1)
+	}
+	dbf, err := sqlitefmt.NewDbFile(os.Args[1])
 	defer dbf.Close()
 	if err != nil {
 		panic(err)
