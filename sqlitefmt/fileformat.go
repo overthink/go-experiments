@@ -3,9 +3,18 @@ package sqlitefmt
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+)
+
+// BTree page type enum
+const (
+	IndexInterior byte = 0x02
+	TableInterior      = 0x05
+	IndexLeaf          = 0x0a
+	TableLeaf          = 0x0d
 )
 
 type DbFile struct {
@@ -14,17 +23,41 @@ type DbFile struct {
 	Header   DbHeader
 }
 
-type BTreeLeafPage struct {
-	Type                uint8
+type BTLeafPageHeader struct {
+	Type                byte
 	FirstFreeblock      uint16
 	CellCount           uint16
 	CellContentStart    uint16
 	FragmentedFreeBytes uint8
 }
 
-type BTreeInteriorPage struct {
-	BTreeLeafPage
+type BTInteriorPageHeader struct {
+	BTLeafPageHeader
 	RightmostPointer uint32
+}
+
+type varint = int64
+
+type BTTableLeafCell struct {
+	PayloadSize  varint
+	RowID        varint // key
+	Payload      []byte // value, I guess row data?
+	OverflowPage uint32 // >0 if payload overflows
+}
+
+type BTLeafPage struct {
+	Header       BTLeafPageHeader
+	CellPointers []int16
+	Cells        []BTTableLeafCell
+	CellContent  []byte
+}
+
+func (p *BTLeafPage) HexDump() {
+	println(hex.Dump(p.CellContent))
+}
+
+type OverflowPage struct {
+	NextPage uint32
 }
 
 func NewDbFile(filename string) (DbFile, error) {
@@ -67,20 +100,25 @@ func (dbf *DbFile) Page(pageNum uint32) (interface{}, error) {
 		data = data[100:]
 	}
 	r := bytes.NewReader(data)
-	if data[0] == 0x02 || data[0] == 0x05 {
-		// interior page
-		result := BTreeInteriorPage{}
+	if data[0] == TableInterior || data[0] == IndexInterior {
+		result := BTInteriorPageHeader{}
 		if err := binary.Read(r, binary.BigEndian, &result); err != nil {
 			return nil, fmt.Errorf("failed to decode interior btree page header: %v", err)
 		}
 		return result, nil
-	} else if data[0] == 0x0a || data[0] == 0x0d {
-		// leaf page
-		result := BTreeLeafPage{}
-		if err := binary.Read(r, binary.BigEndian, &result); err != nil {
+	} else if data[0] == TableLeaf || data[0] == IndexLeaf {
+		header := BTLeafPageHeader{}
+		if err := binary.Read(r, binary.BigEndian, &header); err != nil {
 			return nil, fmt.Errorf("failed to decode leaf btree page header: %v", err)
 		}
-		return result, nil
+		if data[0] == TableLeaf {
+			page := BTLeafPage{
+				Header:      header,
+				CellContent: data[header.CellContentStart:],
+			}
+			return page, nil
+		}
+		return header, nil
 	}
 	return nil, fmt.Errorf("invalid btree page type: %v", data[0])
 }
@@ -152,8 +190,11 @@ func (h *DbHeader) SQLiteVersionString() string {
 func (h *DbHeader) Print() {
 	println("Header string:      ", h.HeaderBytesString())
 	println("Page size:          ", h.PageSize)
+	println("Reserved space:     ", h.ReservedSpace)
 	println("Number of pages:    ", h.NumPages)
 	println("File change count:  ", h.FileChangeCount)
+	println("1st freelist page:  ", h.FirstFreelistTrunkPage)
+	println("Freelist page count:", h.FreelistPagesCount)
 	println("Text encoding:      ", h.TextEncodingString())
 	println("Read version:       ", h.ReadVersionString())
 	println("Write version:      ", h.WriteVersionString())

@@ -22,6 +22,15 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("page %d: %+v\n", i, p)
+		fmt.Printf("page %d:\n", i)
+		if leaf, ok := p.(sqlitefmt.BTLeafPage); ok {
+			fmt.Printf("type: %v\n", leaf.Header.Type)
+			leaf.HexDump()
+		} else {
+			fmt.Printf("%+v\n\n", p)
+		}
+		if i > 5 {
+			break
+		}
 	}
 }
