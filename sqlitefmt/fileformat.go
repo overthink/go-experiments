@@ -36,21 +36,52 @@ type BTInteriorPageHeader struct {
 	RightmostPointer uint32
 }
 
-type varint = int64
-
-type BTTableLeafCell struct {
-	PayloadSize  varint
-	RowID        varint // key
-	Payload      []byte // value, I guess row data?
-	OverflowPage uint32 // >0 if payload overflows
-}
-
 type BTLeafPage struct {
 	Header       BTLeafPageHeader
 	CellPointers []int16
 	Cells        []BTTableLeafCell
 	CellContent  []byte
 }
+
+type varint = int64
+
+type BTTableLeafCell struct {
+	PayloadSize  varint
+	RowID        varint // key
+	Payload      []byte // value, i.e. the row data
+	OverflowPage uint32 // >0 iff payload overflows
+}
+
+/*
+payload calc, table btree leaf page
+pagesize = 4096
+U = usable size = 4096-reserved space == 4096
+X = max payload allowed on page = U-35 == 4061
+P = payload (size of row in this case) = let's say it's big: 6000 bytes
+M = min payload that must be on-page = ((U-12)*32/255)-23 == 485
+K = ? "keep?" = M+((P-M)%(U-4)) == 485+((6000-485)%4092) == 1908
+
+K is < X, so we'll store K==1908 bytes on the page.
+
+Why this number? I think because it leaves 6000-1908==4092 bytes for the
+overflow page. An overflow page format is 4-byte pointer to next page, then the
+payload, so 4+4092==4096==pagesize so the overflow will be fully utilized. Clever.
+
+It's different for btree index pages though. In those cases we want to make
+sure a page can have at least 4 keys on it to ensure a reasonable fanout in the
+tree. So the math is slightly  different.
+
+payload calc, index btree page
+pagesize = 4096
+U = usable size = 4096-reserved space == 4096
+X = max payload allowed on page = ((U-12)*64/255)-23 == 1002
+P = payload (size of index key) = let's say it's big: 6000 bytes
+M = min payload that must be on-page = ((U-12)*32/255)-23 == 485
+K = ? "keep?" = M+((P-M)%(U-4)) == 485+((6000-485)%4092) == 1908
+
+K is > X, so we'll only keep M==485 bytes on the page, and the rest will go to
+overflow.
+*/
 
 func (p *BTLeafPage) HexDump() {
 	println(hex.Dump(p.CellContent))
@@ -80,6 +111,9 @@ func (dbf *DbFile) Close() error {
 	return nil
 }
 
+// Page returns the requested pageNum from the underlying db file. If the first
+// page is requested, the db header portion is NOT inlcluded in the returned
+// byte array.
 func (dbf *DbFile) Page(pageNum uint32) ([]byte, error) {
 	if pageNum > dbf.Header.NumPages {
 		return nil, fmt.Errorf(
