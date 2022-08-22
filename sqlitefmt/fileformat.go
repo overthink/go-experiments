@@ -80,7 +80,7 @@ func (dbf *DbFile) Close() error {
 	return nil
 }
 
-func (dbf *DbFile) Page(pageNum uint32) (interface{}, error) {
+func (dbf *DbFile) Page(pageNum uint32) ([]byte, error) {
 	if pageNum > dbf.Header.NumPages {
 		return nil, fmt.Errorf(
 			"asked for page %d but max page is %d",
@@ -99,28 +99,34 @@ func (dbf *DbFile) Page(pageNum uint32) (interface{}, error) {
 		// Page 1 contains 100 bytes of db header, so chuck that
 		data = data[100:]
 	}
-	r := bytes.NewReader(data)
-	if data[0] == TableInterior || data[0] == IndexInterior {
+	return data, nil
+}
+
+func (dbf *DbFile) DecodeBTreePage(pageData []byte) (interface{}, error) {
+	pageType := pageData[0]
+	r := bytes.NewReader(pageData)
+	if pageType == TableInterior || pageType == IndexInterior {
 		result := BTInteriorPageHeader{}
 		if err := binary.Read(r, binary.BigEndian, &result); err != nil {
 			return nil, fmt.Errorf("failed to decode interior btree page header: %v", err)
 		}
 		return result, nil
-	} else if data[0] == TableLeaf || data[0] == IndexLeaf {
+	} else if pageType == TableLeaf || pageType == IndexLeaf {
 		header := BTLeafPageHeader{}
 		if err := binary.Read(r, binary.BigEndian, &header); err != nil {
 			return nil, fmt.Errorf("failed to decode leaf btree page header: %v", err)
 		}
-		if data[0] == TableLeaf {
+		if pageType == TableLeaf {
 			page := BTLeafPage{
 				Header:      header,
-				CellContent: data[header.CellContentStart:],
+				CellContent: pageData[header.CellContentStart:],
 			}
 			return page, nil
 		}
 		return header, nil
 	}
-	return nil, fmt.Errorf("invalid btree page type: %v", data[0])
+	// TODO: handle non-btree pages like payload overflow, and ptrmap
+	return nil, fmt.Errorf("invalid btree page type: %v", pageType)
 }
 
 // DbHeader is the format of the first 100 bytes of an SQLite file.
