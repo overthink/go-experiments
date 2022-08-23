@@ -18,21 +18,21 @@ func main() {
 	}
 	dbf.Header.Print()
 	for i := uint32(1); i <= dbf.Header.NumPages; i++ {
-		pageData, err := dbf.Page(i)
+		page, err := dbf.Page(i)
 		if err != nil {
 			panic(err)
 		}
 		// TODO: false assumption here that all pages are btree pages
-		p, err := dbf.DecodeBTreePage(pageData)
+		decoded, err := dbf.DecodeBTreePage(page)
 		if err != nil {
 			panic(err)
 		}
 		fmt.Printf("page %d:\n", i)
-		if leaf, ok := p.(sqlitefmt.BTLeafPage); ok {
+		if leaf, ok := decoded.(sqlitefmt.BTTableLeafPage); ok {
 			fmt.Printf("type: %v\n", leaf.Header.Type)
-			leaf.HexDump()
+			fmt.Printf("%+v\n", leaf)
 		} else {
-			fmt.Printf("%+v\n\n", p)
+			fmt.Printf("%+v\n\n", decoded)
 		}
 		if i > 5 {
 			break

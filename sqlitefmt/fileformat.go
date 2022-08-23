@@ -3,7 +3,6 @@ package sqlitefmt
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +22,11 @@ type DbFile struct {
 	Header   DbHeader
 }
 
+type Page struct {
+	Number uint32
+	Data   []byte
+}
+
 type BTLeafPageHeader struct {
 	Type                byte
 	FirstFreeblock      uint16
@@ -36,13 +40,6 @@ type BTInteriorPageHeader struct {
 	RightmostPointer uint32
 }
 
-type BTLeafPage struct {
-	Header       BTLeafPageHeader
-	CellPointers []int16
-	Cells        []BTTableLeafCell
-	CellContent  []byte
-}
-
 type varint = int64
 
 type BTTableLeafCell struct {
@@ -50,6 +47,97 @@ type BTTableLeafCell struct {
 	RowID        varint // key
 	Payload      []byte // value, i.e. the row data
 	OverflowPage uint32 // >0 iff payload overflows
+}
+
+func NewBTTableLeafCell(data []byte) (BTTableLeafCell, error) {
+	println("---")
+	println("cell data size", len(data))
+	result := BTTableLeafCell{}
+	r := bytes.NewReader(data)
+
+	println("len1", r.Len())
+
+	payloadSize, err := ReadVarint(r)
+	if err != nil {
+		return result, fmt.Errorf("error decoding payloadSize: %v", err)
+	}
+	result.PayloadSize = payloadSize
+
+	println("len2", r.Len(), "payloadSize", payloadSize)
+
+	rowid, err := ReadVarint(r)
+	if err != nil {
+		return result, fmt.Errorf("error decoding rowid: %v", err)
+	}
+	result.RowID = rowid
+
+	println("len3", r.Len(), "rowid", rowid)
+
+	payload := make([]byte, payloadSize)
+	if err := binary.Read(r, binary.BigEndian, &payload); err != nil {
+		return result, fmt.Errorf("error decoding payoad: %v", err)
+	}
+	result.Payload = payload
+
+	return result, nil
+}
+
+type BTTableLeafPage struct {
+	Header BTLeafPageHeader
+	Cells  []BTTableLeafCell
+}
+
+// As defined in https://www.sqlite.org/fileformat.html#b_tree_pages
+var maxVarintBytes = 9
+
+// ReadVarint decodes a big-endian encoded varint from the reader r. We can't
+// use binary.ReadVarint because it assumes the varint is stored little-endian.
+// Based on https://cs.opensource.google/go/go/+/refs/tags/go1.19:src/encoding/binary/varint.go;l=129
+func ReadVarint(r io.ByteReader) (int64, error) {
+	var result int64
+	shift := 0
+	for i := 0; i < maxVarintBytes; i++ {
+		b, err := r.ReadByte()
+		if err != nil {
+			return result, nil
+		}
+		if b < 0b10000000 {
+			// MSB not set, this is the last byte of the varint
+			// TODO: overflow check?
+			result = (result << shift) | int64(b)
+			return result, nil
+		}
+		result = (result << shift) | int64(b&0b01111111)
+		shift += 7
+	}
+	return result, nil
+}
+
+func NewBTTableLeafPage(page Page) (BTTableLeafPage, error) {
+	result := BTTableLeafPage{}
+	r := bytes.NewReader(page.Data)
+	if page.Number == 1 {
+		r.Seek(100, io.SeekStart)
+	}
+	if err := binary.Read(r, binary.BigEndian, &result.Header); err != nil {
+		return result, fmt.Errorf("error decoding table leaf page header: %v", err)
+	}
+
+	cellOffsets := make([]uint16, result.Header.CellCount)
+	if err := binary.Read(r, binary.BigEndian, &cellOffsets); err != nil {
+		return result, fmt.Errorf("error decoding table leaf page cell offset: %v", err)
+	}
+
+	cells := make([]BTTableLeafCell, result.Header.CellCount)
+	for i, offset := range cellOffsets {
+		cell, err := NewBTTableLeafCell(page.Data[offset:])
+		if err != nil {
+			return result, fmt.Errorf("error decoding table leaf page cell: %v", err)
+		}
+		cells[i] = cell
+	}
+	result.Cells = cells
+	return result, nil
 }
 
 /*
@@ -69,7 +157,7 @@ payload, so 4+4092==4096==pagesize so the overflow will be fully utilized. Cleve
 
 It's different for btree index pages though. In those cases we want to make
 sure a page can have at least 4 keys on it to ensure a reasonable fanout in the
-tree. So the math is slightly  different.
+tree. So the math is slightly different.
 
 payload calc, index btree page
 pagesize = 4096
@@ -82,10 +170,6 @@ K = ? "keep?" = M+((P-M)%(U-4)) == 485+((6000-485)%4092) == 1908
 K is > X, so we'll only keep M==485 bytes on the page, and the rest will go to
 overflow.
 */
-
-func (p *BTLeafPage) HexDump() {
-	println(hex.Dump(p.CellContent))
-}
 
 type OverflowPage struct {
 	NextPage uint32
@@ -111,34 +195,38 @@ func (dbf *DbFile) Close() error {
 	return nil
 }
 
-// Page returns the requested pageNum from the underlying db file. If the first
-// page is requested, the db header portion is NOT inlcluded in the returned
-// byte array.
-func (dbf *DbFile) Page(pageNum uint32) ([]byte, error) {
+// Page returns the requested pageNum from the underlying db file.
+func (dbf *DbFile) Page(pageNum uint32) (Page, error) {
+	page := Page{}
 	if pageNum > dbf.Header.NumPages {
-		return nil, fmt.Errorf(
+		return page, fmt.Errorf(
 			"asked for page %d but max page is %d",
 			pageNum,
 			dbf.Header.NumPages,
 		)
 	}
+	page.Number = pageNum
 	offset := int64(dbf.Header.PageSize) * int64(pageNum-1)
 	_, err := dbf.file.Seek(offset, io.SeekStart)
 	if err != nil {
-		return nil, err
+		return page, err
 	}
-	data := make([]byte, dbf.Header.PageSize)
-	_, err = io.ReadAtLeast(dbf.file, data, int(dbf.Header.PageSize))
-	if pageNum == 1 {
-		// Page 1 contains 100 bytes of db header, so chuck that
-		data = data[100:]
-	}
-	return data, nil
+	page.Data = make([]byte, dbf.Header.PageSize)
+	_, err = io.ReadAtLeast(dbf.file, page.Data, len(page.Data))
+	return page, nil
 }
 
-func (dbf *DbFile) DecodeBTreePage(pageData []byte) (interface{}, error) {
-	pageType := pageData[0]
-	r := bytes.NewReader(pageData)
+func (dbf *DbFile) DecodeBTreePage(page Page) (interface{}, error) {
+	r := bytes.NewReader(page.Data)
+	if page.Number == 1 {
+		r.Seek(100, io.SeekStart)
+	}
+
+	pageType, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("error reading pageType: %v", err)
+	}
+
 	if pageType == TableInterior || pageType == IndexInterior {
 		result := BTInteriorPageHeader{}
 		if err := binary.Read(r, binary.BigEndian, &result); err != nil {
@@ -146,16 +234,12 @@ func (dbf *DbFile) DecodeBTreePage(pageData []byte) (interface{}, error) {
 		}
 		return result, nil
 	} else if pageType == TableLeaf || pageType == IndexLeaf {
+		if pageType == TableLeaf {
+			return NewBTTableLeafPage(page)
+		}
 		header := BTLeafPageHeader{}
 		if err := binary.Read(r, binary.BigEndian, &header); err != nil {
 			return nil, fmt.Errorf("failed to decode leaf btree page header: %v", err)
-		}
-		if pageType == TableLeaf {
-			page := BTLeafPage{
-				Header:      header,
-				CellContent: pageData[header.CellContentStart:],
-			}
-			return page, nil
 		}
 		return header, nil
 	}
